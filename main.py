@@ -630,3 +630,82 @@ class Position:
     qty: float
     entry: float
     t_open: int
+    max_favorable: float = 0.0
+    max_adverse: float = 0.0
+
+    def mark(self, px: float) -> dict:
+        if self.side == 1:
+            pnl = (px - self.entry) * self.qty
+        else:
+            pnl = (self.entry - px) * self.qty
+        return {"pnl": pnl, "roi": pnl / max(1e-9, abs(self.entry * self.qty))}
+
+
+@dataclasses.dataclass
+class Trade:
+    id: str
+    t_open: int
+    t_close: int | None
+    market: str
+    side: int
+    qty: float
+    entry: float
+    exit: float | None
+    fee: float
+    pnl: float
+    status: str  # OPEN/CLOSED/REJECTED
+    reason: str
+
+
+class PriceOracle:
+    """Pseudo-oracle for paper trading (seeded random walk + snapshots)."""
+
+    def __init__(self, identity: AppIdentity) -> None:
+        self.identity = identity
+        self._lock = threading.Lock()
+        self._state: dict[str, dict] = {}
+
+    def _seed(self, market: str) -> int:
+        return int(hashlib.sha256((self.identity.instance_salt + market).encode()).hexdigest()[:8], 16)
+
+    def get(self, market: str) -> float:
+        with self._lock:
+            st = self._state.get(market)
+            if st is None:
+                rnd = random.Random(self._seed(market))
+                base = 100.0 + rnd.random() * 900.0
+                st = {
+                    "px": base,
+                    "t": utc_ts(),
+                    "rnd": rnd,
+                    "vol": 0.007 + rnd.random() * 0.02,
+                }
+                self._state[market] = st
+            t_now = utc_ts()
+            dt = max(1, t_now - int(st["t"]))
+            st["t"] = t_now
+            px = float(st["px"])
+            vol = float(st["vol"])
+            rnd = st["rnd"]
+            for _ in range(min(60, dt)):
+                step = rnd.gauss(0, 1) * vol
+                px *= math.exp(step)
+            st["px"] = px
+            return px
+
+    def set_snapshot(self, market: str, px: float) -> None:
+        with self._lock:
+            st = self._state.get(market)
+            if st is None:
+                st = {"px": float(px), "t": utc_ts(), "rnd": random.Random(self._seed(market)), "vol": 0.012}
+                self._state[market] = st
+            st["px"] = float(px)
+            st["t"] = utc_ts()
+
+
+class RiskEngine:
+    def __init__(self, cfg: AppConfig) -> None:
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._day0 = utc_ts()
+        self._day_start_equity = cfg.starting_balance
