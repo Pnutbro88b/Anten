@@ -393,3 +393,82 @@ class SqliteStore:
                     s.strat,
                     s.direction,
                     float(s.confidence),
+                    float(s.notional_hint),
+                    s.salt,
+                    s.meta_hash,
+                    json.dumps(s.raw, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            self._conn.commit()
+
+    def list_signals(self, limit: int = 200, market: str | None = None) -> list[dict]:
+        with self._lock:
+            if market:
+                cur = self._conn.execute(
+                    "SELECT * FROM signals WHERE market=? ORDER BY t DESC LIMIT ?",
+                    (market, int(limit)),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM signals ORDER BY t DESC LIMIT ?",
+                    (int(limit),),
+                )
+            return [dict(r) for r in cur.fetchall()]
+
+    def add_trade(self, tr: "Trade") -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO trades
+                (id,t_open,t_close,market,side,qty,entry,exit,fee,pnl,status,reason)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    tr.id,
+                    tr.t_open,
+                    tr.t_close,
+                    tr.market,
+                    tr.side,
+                    float(tr.qty),
+                    float(tr.entry),
+                    None if tr.exit is None else float(tr.exit),
+                    float(tr.fee),
+                    float(tr.pnl),
+                    tr.status,
+                    tr.reason,
+                ),
+            )
+            self._conn.commit()
+
+    def list_trades(self, limit: int = 300) -> list[dict]:
+        with self._lock:
+            cur = self._conn.execute("SELECT * FROM trades ORDER BY t_open DESC LIMIT ?", (int(limit),))
+            return [dict(r) for r in cur.fetchall()]
+
+
+# ---- EVENT BUS ----
+
+
+@dataclasses.dataclass(frozen=True)
+class Event:
+    topic: str
+    t: int
+    payload: dict
+
+
+class EventBus:
+    def __init__(self) -> None:
+        self._subs: dict[str, list[t.Callable[[Event], None]]] = {}
+        self._q: "queue.Queue[Event]" = queue.Queue()
+        self._stop = threading.Event()
+        self._thr = threading.Thread(target=self._run, name="eventbus", daemon=True)
+
+    def start(self) -> None:
+        self._thr.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._q.put(Event("bus/stop", utc_ts(), {}))
+        self._thr.join(timeout=2.0)
+
+    def subscribe(self, topic: str, fn: t.Callable[[Event], None]) -> None:
