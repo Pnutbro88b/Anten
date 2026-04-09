@@ -156,3 +156,82 @@ def is_debug() -> bool:
 class Logger:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._level = log_level()
+        self._levels = {"TRACE": 5, "DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+
+    def _ok(self, lvl: str) -> bool:
+        return self._levels.get(lvl, 20) >= self._levels.get(self._level, 20)
+
+    def _emit(self, lvl: str, msg: str) -> None:
+        with self._lock:
+            ts = now_utc().strftime("%H:%M:%S")
+            out = f"[{ts}] {lvl:<5} {msg}"
+            print(out, file=sys.stderr if lvl in {"WARN", "ERROR"} else sys.stdout, flush=True)
+
+    def trace(self, msg: str) -> None:
+        if self._ok("TRACE"):
+            self._emit("TRACE", msg)
+
+    def debug(self, msg: str) -> None:
+        if self._ok("DEBUG"):
+            self._emit("DEBUG", msg)
+
+    def info(self, msg: str) -> None:
+        if self._ok("INFO"):
+            self._emit("INFO", msg)
+
+    def warn(self, msg: str) -> None:
+        if self._ok("WARN"):
+            self._emit("WARN", msg)
+
+    def error(self, msg: str) -> None:
+        if self._ok("ERROR"):
+            self._emit("ERROR", msg)
+
+
+LOG = Logger()
+
+
+def exc_to_str(e: BaseException) -> str:
+    return "".join(traceback.format_exception(type(e), e, e.__traceback__)).strip()
+
+
+# ---- CONFIG ----
+
+
+@dataclasses.dataclass(frozen=True)
+class AppIdentity:
+    run_id: str
+    instance_salt: str
+
+
+@dataclasses.dataclass
+class AppConfig:
+    # UI
+    theme: str = "dark"
+    ui_tick_ms: int = 150
+    show_advanced: bool = True
+
+    # Signal filters
+    allowed_markets: list[str] = dataclasses.field(default_factory=list)
+    min_confidence: float = 0.55
+    max_signals_per_min: int = 60
+
+    # Paper broker defaults
+    account_currency: str = "USD"
+    starting_balance: float = 25_000.0
+    maker_fee_bps: float = 2.0
+    taker_fee_bps: float = 7.0
+    max_leverage: float = 5.0
+    risk_per_trade: float = 0.008
+    max_open_positions: int = 7
+
+    # Risk controls
+    max_daily_loss_pct: float = 0.06
+    max_drawdown_pct: float = 0.18
+    cooldown_sec: int = 8
+    kill_switch: bool = False
+
+    # Telegram
+    telegram_enabled: bool = True
+    telegram_chat_allowlist: list[int] = dataclasses.field(default_factory=list)
