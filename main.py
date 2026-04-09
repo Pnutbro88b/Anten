@@ -551,3 +551,82 @@ class SignalCodec:
 
         strat = str(raw.get("strat", "") or raw.get("strategy", "") or "").strip()
         if not strat:
+            strat = "strat/" + sha256_hex(json.dumps(raw, sort_keys=True))[:12]
+        if len(strat) > 80:
+            strat = strat[:80]
+
+        direction = safe_int(raw.get("direction", raw.get("side", 0)), 0)
+        if direction not in (-1, 0, 1):
+            # allow textual
+            s = str(raw.get("direction", "")).lower()
+            if s in {"long", "buy", "1", "+1"}:
+                direction = 1
+            elif s in {"short", "sell", "-1"}:
+                direction = -1
+            else:
+                direction = 0
+
+        confidence = safe_float(raw.get("confidence", raw.get("conf", 0.5)), 0.5)
+        confidence = clamp(confidence, 0.0, 1.0)
+
+        notional_hint = safe_float(raw.get("notional_hint", raw.get("notional", 0.0)), 0.0)
+        notional_hint = max(0.0, notional_hint)
+
+        meta_hash = str(raw.get("meta_hash", raw.get("metaHash", "")) or "").strip()
+        if not meta_hash:
+            # derive a stable hash from raw payload + instance salt (avoids collisions in UI)
+            meta_hash = sha256_hex(self.identity.instance_salt + json.dumps(raw, sort_keys=True))[:64]
+
+        salt = str(raw.get("salt", "") or "").strip()
+        if not salt:
+            salt = secrets.token_hex(16)
+
+        t0 = safe_int(raw.get("t", raw.get("time", utc_ts())), utc_ts())
+        if t0 < 0:
+            t0 = utc_ts()
+
+        sid = str(raw.get("id", "") or "").strip()
+        if not sid:
+            sid = "sig_" + sha256_hex(f"{t0}|{market}|{strat}|{direction}|{confidence}|{salt}|{meta_hash}")[:20]
+
+        return Signal(
+            id=sid,
+            t=t0,
+            market=market,
+            strat=strat,
+            direction=direction,
+            confidence=confidence,
+            notional_hint=notional_hint,
+            salt=salt,
+            meta_hash=meta_hash,
+            raw=raw,
+        )
+
+
+class SignalLimiter:
+    def __init__(self, max_per_min: int) -> None:
+        self.max_per_min = max(1, int(max_per_min))
+        self._lock = threading.Lock()
+        self._bucket: list[int] = []
+
+    def allow(self, t_now: int | None = None) -> bool:
+        t_now = utc_ts() if t_now is None else int(t_now)
+        with self._lock:
+            cutoff = t_now - 60
+            self._bucket = [t for t in self._bucket if t >= cutoff]
+            if len(self._bucket) >= self.max_per_min:
+                return False
+            self._bucket.append(t_now)
+            return True
+
+
+# ---- PAPER BROKER ----
+
+
+@dataclasses.dataclass
+class Position:
+    market: str
+    side: int  # +1 long, -1 short
+    qty: float
+    entry: float
+    t_open: int
