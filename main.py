@@ -235,3 +235,82 @@ class AppConfig:
     # Telegram
     telegram_enabled: bool = True
     telegram_chat_allowlist: list[int] = dataclasses.field(default_factory=list)
+    telegram_admins: list[int] = dataclasses.field(default_factory=list)
+
+    # Storage paths
+    db_path: str = ""
+    export_dir: str = ""
+
+    def normalize(self) -> None:
+        if self.ui_tick_ms < 50:
+            self.ui_tick_ms = 50
+        if self.ui_tick_ms > 2000:
+            self.ui_tick_ms = 2000
+        self.min_confidence = clamp(self.min_confidence, 0.0, 1.0)
+        self.max_signals_per_min = max(1, min(10_000, int(self.max_signals_per_min)))
+        self.starting_balance = max(0.0, float(self.starting_balance))
+        self.max_leverage = clamp(float(self.max_leverage), 1.0, 50.0)
+        self.risk_per_trade = clamp(float(self.risk_per_trade), 0.0001, 0.25)
+        self.max_open_positions = max(1, min(200, int(self.max_open_positions)))
+        self.max_daily_loss_pct = clamp(float(self.max_daily_loss_pct), 0.0, 0.99)
+        self.max_drawdown_pct = clamp(float(self.max_drawdown_pct), 0.0, 0.99)
+        self.cooldown_sec = max(0, min(3600, int(self.cooldown_sec)))
+
+        if not self.db_path:
+            self.db_path = env("ANTEN_DB_PATH") or os.path.join(app_home(), "anten.sqlite3")
+        if not self.export_dir:
+            self.export_dir = os.path.join(app_home(), "exports")
+        ensure_dir(os.path.dirname(self.db_path))
+        ensure_dir(self.export_dir)
+
+
+class ConfigStore:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def load(self) -> AppConfig:
+        with self._lock:
+            if not os.path.exists(self.path):
+                cfg = AppConfig()
+                cfg.normalize()
+                return cfg
+            try:
+                raw = json.loads(open(self.path, "r", encoding="utf-8").read())
+                cfg = AppConfig(**raw)
+                cfg.normalize()
+                return cfg
+            except Exception as e:
+                raise ConfigError(f"Could not load config: {e}") from e
+
+    def save(self, cfg: AppConfig) -> None:
+        with self._lock:
+            try:
+                cfg.normalize()
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(dataclasses.asdict(cfg), f, indent=2, sort_keys=True)
+                os.replace(tmp, self.path)
+            except Exception as e:
+                raise ConfigError(f"Could not save config: {e}") from e
+
+
+# ---- STORAGE (SQL) ----
+
+
+SCHEMA_SQL = """
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA temp_store=MEMORY;
+
+CREATE TABLE IF NOT EXISTS kv (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS signals (
+  id TEXT PRIMARY KEY,
+  t INTEGER NOT NULL,
+  market TEXT NOT NULL,
+  strat TEXT NOT NULL,
+  direction INTEGER NOT NULL,
