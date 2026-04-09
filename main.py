@@ -709,3 +709,82 @@ class RiskEngine:
         self._lock = threading.Lock()
         self._day0 = utc_ts()
         self._day_start_equity = cfg.starting_balance
+        self._equity_peak = cfg.starting_balance
+        self._cooldowns: dict[str, int] = {}
+
+    def reset_day(self, equity: float) -> None:
+        with self._lock:
+            self._day0 = utc_ts()
+            self._day_start_equity = equity
+            self._cooldowns = {}
+
+    def update_equity(self, equity: float) -> None:
+        with self._lock:
+            self._equity_peak = max(self._equity_peak, equity)
+
+    def check(self, market: str, equity: float) -> None:
+        if self.cfg.kill_switch:
+            raise RiskError("kill switch is on")
+
+        t_now = utc_ts()
+        if t_now - self._day0 > 24 * 3600:
+            self.reset_day(equity)
+
+        daily_loss = (equity - self._day_start_equity) / max(1e-9, self._day_start_equity)
+        if daily_loss < -abs(self.cfg.max_daily_loss_pct):
+            raise RiskError(f"daily loss limit hit ({fmt_pct(daily_loss)})")
+
+        drawdown = (equity - self._equity_peak) / max(1e-9, self._equity_peak)
+        if drawdown < -abs(self.cfg.max_drawdown_pct):
+            raise RiskError(f"drawdown limit hit ({fmt_pct(drawdown)})")
+
+        cd = self._cooldowns.get(market, 0)
+        if self.cfg.cooldown_sec and t_now < cd:
+            raise RiskError(f"cooldown active for {market} ({cd - t_now}s)")
+
+    def cool(self, market: str) -> None:
+        if self.cfg.cooldown_sec <= 0:
+            return
+        self._cooldowns[market] = utc_ts() + int(self.cfg.cooldown_sec)
+
+
+class PaperBroker:
+    def __init__(self, cfg: AppConfig, oracle: PriceOracle, store: SqliteStore, risk: RiskEngine) -> None:
+        self.cfg = cfg
+        self.oracle = oracle
+        self.store = store
+        self.risk = risk
+        self._lock = threading.RLock()
+        self.cash = float(cfg.starting_balance)
+        self.positions: dict[str, Position] = {}
+        self._fees_paid = 0.0
+        self._trade_count = 0
+
+    def equity(self) -> float:
+        with self._lock:
+            eq = self.cash
+            for p in self.positions.values():
+                px = self.oracle.get(p.market)
+                eq += p.mark(px)["pnl"]
+            return float(eq)
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "cash": self.cash,
+                "equity": self.equity(),
+                "open_positions": len(self.positions),
+                "fees_paid": self._fees_paid,
+                "trade_count": self._trade_count,
+            }
+
+    def _fee(self, notional: float, taker: bool = True) -> float:
+        bps = self.cfg.taker_fee_bps if taker else self.cfg.maker_fee_bps
+        return abs(notional) * (bps / 10_000.0)
+
+    def _qty_from_risk(self, px: float, equity: float) -> float:
+        # risk per trade is applied to notional; simplistic but controllable.
+        risk_budget = equity * float(self.cfg.risk_per_trade)
+        if risk_budget <= 0:
+            return 0.0
+        notional = risk_budget * float(self.cfg.max_leverage)
