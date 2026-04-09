@@ -472,3 +472,82 @@ class EventBus:
         self._thr.join(timeout=2.0)
 
     def subscribe(self, topic: str, fn: t.Callable[[Event], None]) -> None:
+        self._subs.setdefault(topic, []).append(fn)
+
+    def publish(self, topic: str, payload: dict) -> None:
+        self._q.put(Event(topic, utc_ts(), payload))
+
+    def _deliver(self, ev: Event) -> None:
+        # exact
+        for fn in self._subs.get(ev.topic, []):
+            try:
+                fn(ev)
+            except Exception as e:
+                LOG.warn(f"subscriber error topic={ev.topic}: {e}")
+        # prefix wildcards (topic/*)
+        for tpc, fns in list(self._subs.items()):
+            if tpc.endswith("/*"):
+                prefix = tpc[:-2]
+                if ev.topic.startswith(prefix):
+                    for fn in fns:
+                        try:
+                            fn(ev)
+                        except Exception as e:
+                            LOG.warn(f"subscriber error topic={tpc}: {e}")
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                ev = self._q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if ev.topic == "bus/stop":
+                break
+            self._deliver(ev)
+
+
+# ---- SIGNALS ----
+
+
+@dataclasses.dataclass
+class Signal:
+    id: str
+    t: int
+    market: str
+    strat: str
+    direction: int  # -1 short, 0 flat, +1 long
+    confidence: float
+    notional_hint: float
+    salt: str
+    meta_hash: str
+    raw: dict
+
+    def score(self) -> float:
+        # Simple ranking: confidence * direction magnitude (flat becomes 0)
+        return abs(self.direction) * self.confidence
+
+
+class SignalCodec:
+    MARKET_RE = re.compile(r"^[A-Z0-9]{2,12}[:/][A-Z0-9]{2,12}(/[\w\-]{1,10})?$")
+
+    def __init__(self, identity: AppIdentity) -> None:
+        self.identity = identity
+
+    def _canon_market(self, m: str) -> str:
+        m = (m or "").strip().upper()
+        m = m.replace("-", "/").replace(" ", "")
+        if ":" not in m and "/" in m:
+            # allow "BTC/USDT" -> "BTC:USDT"
+            m = m.replace("/", ":")
+        return m
+
+    def parse(self, raw: dict) -> Signal:
+        if not isinstance(raw, dict):
+            raise SignalError("signal must be an object")
+
+        market = self._canon_market(str(raw.get("market", "") or ""))
+        if not market or len(market) > 40:
+            raise SignalError("bad market")
+
+        strat = str(raw.get("strat", "") or raw.get("strategy", "") or "").strip()
+        if not strat:
