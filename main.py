@@ -314,3 +314,82 @@ CREATE TABLE IF NOT EXISTS signals (
   market TEXT NOT NULL,
   strat TEXT NOT NULL,
   direction INTEGER NOT NULL,
+  confidence REAL NOT NULL,
+  notional_hint REAL NOT NULL,
+  salt TEXT NOT NULL,
+  meta_hash TEXT NOT NULL,
+  raw_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_t ON signals(t);
+CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market, t);
+
+CREATE TABLE IF NOT EXISTS trades (
+  id TEXT PRIMARY KEY,
+  t_open INTEGER NOT NULL,
+  t_close INTEGER,
+  market TEXT NOT NULL,
+  side INTEGER NOT NULL,
+  qty REAL NOT NULL,
+  entry REAL NOT NULL,
+  exit REAL,
+  fee REAL NOT NULL,
+  pnl REAL NOT NULL,
+  status TEXT NOT NULL,
+  reason TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_open ON trades(t_open);
+CREATE INDEX IF NOT EXISTS idx_trades_close ON trades(t_close);
+"""
+
+
+class SqliteStore:
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._setup()
+
+    def _setup(self) -> None:
+        with self._lock:
+            self._conn.executescript(SCHEMA_SQL)
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def kv_get(self, k: str, default: str | None = None) -> str | None:
+        with self._lock:
+            cur = self._conn.execute("SELECT v FROM kv WHERE k=?", (k,))
+            row = cur.fetchone()
+            return row["v"] if row else default
+
+    def kv_set(self, k: str, v: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (k, v),
+            )
+            self._conn.commit()
+
+    def add_signal(self, s: "Signal") -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO signals
+                (id,t,market,strat,direction,confidence,notional_hint,salt,meta_hash,raw_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    s.id,
+                    s.t,
+                    s.market,
+                    s.strat,
+                    s.direction,
+                    float(s.confidence),
