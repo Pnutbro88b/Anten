@@ -788,3 +788,82 @@ class PaperBroker:
         if risk_budget <= 0:
             return 0.0
         notional = risk_budget * float(self.cfg.max_leverage)
+        qty = notional / max(1e-9, px)
+        return max(0.0, qty)
+
+    def open_from_signal(self, s: Signal, reason: str = "signal") -> Trade:
+        with self._lock:
+            px = self.oracle.get(s.market)
+            eq = self.equity()
+            self.risk.check(s.market, eq)
+
+            if len(self.positions) >= int(self.cfg.max_open_positions):
+                raise BrokerError("max open positions reached")
+
+            if s.direction == 0:
+                raise BrokerError("flat signal not tradable")
+
+            if s.market in self.positions:
+                # already in position; treat as no-op
+                raise BrokerError("position already open")
+
+            qty = self._qty_from_risk(px, eq)
+            if qty <= 0:
+                raise BrokerError("qty computed as zero")
+
+            # apply confidence as fraction of size
+            qty *= clamp(float(s.confidence), 0.05, 1.0)
+
+            notional = qty * px
+            fee = self._fee(notional, taker=True)
+            if self.cash - fee < 0:
+                raise BrokerError("insufficient cash for fees")
+
+            self.cash -= fee
+            self._fees_paid += fee
+            self._trade_count += 1
+
+            pos = Position(market=s.market, side=int(s.direction), qty=float(qty), entry=float(px), t_open=utc_ts())
+            self.positions[s.market] = pos
+
+            tr = Trade(
+                id="tr_" + short_id(),
+                t_open=pos.t_open,
+                t_close=None,
+                market=s.market,
+                side=pos.side,
+                qty=pos.qty,
+                entry=pos.entry,
+                exit=None,
+                fee=fee,
+                pnl=0.0,
+                status="OPEN",
+                reason=reason,
+            )
+            self.store.add_trade(tr)
+            self.risk.cool(s.market)
+            return tr
+
+    def close(self, market: str, reason: str = "close") -> Trade:
+        with self._lock:
+            if market not in self.positions:
+                raise BrokerError("no such position")
+            pos = self.positions.pop(market)
+            px = self.oracle.get(market)
+            mark = pos.mark(px)
+            pnl = float(mark["pnl"])
+            notional = pos.qty * px
+            fee = self._fee(notional, taker=True)
+            self.cash += pnl
+            self.cash -= fee
+            self._fees_paid += fee
+            self._trade_count += 1
+
+            tr = Trade(
+                id="tr_" + short_id(),
+                t_open=pos.t_open,
+                t_close=utc_ts(),
+                market=pos.market,
+                side=pos.side,
+                qty=pos.qty,
+                entry=pos.entry,
