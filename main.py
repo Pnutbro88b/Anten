@@ -77,3 +77,82 @@ def safe_float(x: t.Any, default: float = 0.0) -> float:
         if isinstance(x, bool):
             return float(int(x))
         return float(x)
+    except Exception:
+        return default
+
+
+def safe_int(x: t.Any, default: int = 0) -> int:
+    try:
+        if x is None:
+            return default
+        if isinstance(x, bool):
+            return int(x)
+        return int(float(x))
+    except Exception:
+        return default
+
+
+def short_id(prefix: str = "") -> str:
+    s = uuid.uuid4().hex[:10]
+    return f"{prefix}{s}" if prefix else s
+
+
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def jitter_sleep(base: float, spread: float = 0.35) -> None:
+    r = random.random() * spread
+    time.sleep(max(0.0, base - spread / 2 + r))
+
+
+def human_dt(ts: int) -> str:
+    try:
+        return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(ts)
+
+
+def fmt_money(x: float, sym: str = "$") -> str:
+    try:
+        return f"{sym}{x:,.2f}"
+    except Exception:
+        return f"{sym}{x}"
+
+
+def fmt_pct(x: float) -> str:
+    try:
+        return f"{x*100:.2f}%"
+    except Exception:
+        return f"{x}%"
+
+
+def ensure_dir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+
+def app_home() -> str:
+    base = os.path.expanduser("~")
+    p = os.path.join(base, f".{APP_NAME.lower()}")
+    ensure_dir(p)
+    return p
+
+
+def env(name: str, default: str | None = None) -> str | None:
+    v = os.environ.get(name)
+    if v is None or v.strip() == "":
+        return default
+    return v.strip()
+
+
+def log_level() -> str:
+    return (env("ANTEN_LOG_LEVEL", "INFO") or "INFO").upper()
+
+
+def is_debug() -> bool:
+    return log_level() in {"DEBUG", "TRACE"}
+
+
+class Logger:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
