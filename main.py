@@ -1262,3 +1262,82 @@ class DesktopApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._build_style()
+        self._build_layout()
+
+        self._ui_last_snapshot: dict | None = None
+        self._tick()
+
+    def _build_style(self) -> None:
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        if self.cfg.theme == "dark":
+            self.root.configure(bg="#101418")
+            style.configure("TFrame", background="#101418")
+            style.configure("TLabel", background="#101418", foreground="#e6edf3")
+            style.configure("TButton", padding=6)
+            style.configure("TEntry", padding=4)
+            style.configure("TLabelframe", background="#101418", foreground="#e6edf3")
+            style.configure("TLabelframe.Label", background="#101418", foreground="#e6edf3")
+        else:
+            self.root.configure(bg="#f3f6fb")
+
+    def _build_layout(self) -> None:
+        top = ttk.Frame(self.root)
+        top.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        self.lbl_title = ttk.Label(top, text=f"{APP_NAME}  |  Run: {self.identity.run_id}")
+        self.lbl_title.pack(side=tk.LEFT)
+
+        self.btn_import = ttk.Button(top, text="Import signal JSON…", command=self.import_signal)
+        self.btn_import.pack(side=tk.RIGHT, padx=6)
+
+        self.btn_export = ttk.Button(top, text="Export signals…", command=self.export_signals)
+        self.btn_export.pack(side=tk.RIGHT, padx=6)
+
+        mid = ttk.Frame(self.root)
+        mid.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        left = ttk.Frame(mid)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+
+        right = ttk.Frame(mid)
+        right.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Status console
+        lf = ttk.Labelframe(left, text="Live console")
+        lf.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.txt = tk.Text(lf, height=20, wrap="word", bg="#0b0f14", fg="#e6edf3", insertbackground="#e6edf3")
+        self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(lf, orient="vertical", command=self.txt.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.txt.configure(yscrollcommand=sb.set)
+
+        # Controls panel
+        lf2 = ttk.Labelframe(right, text="Controls")
+        lf2.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
+
+        self.var_kill = tk.BooleanVar(value=bool(self.cfg.kill_switch))
+        chk = ttk.Checkbutton(lf2, text="Kill switch", variable=self.var_kill, command=self.on_kill_toggle)
+        chk.pack(side=tk.TOP, anchor="w", padx=8, pady=6)
+
+        ttk.Button(lf2, text="Close all positions", command=self.on_close_all).pack(
+            side=tk.TOP, fill=tk.X, padx=8, pady=4
+        )
+        ttk.Button(lf2, text="Snapshot equity", command=self.on_snapshot).pack(
+            side=tk.TOP, fill=tk.X, padx=8, pady=4
+        )
+
+        # Signal composer
+        lf3 = ttk.Labelframe(right, text="Quick signal")
+        lf3.pack(side=tk.TOP, fill=tk.X)
+
+        self.ent_market = ttk.Entry(lf3)
+        self.ent_market.insert(0, "BTC:USDT")
+        self.ent_market.pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
+
+        self.ent_conf = ttk.Entry(lf3)
+        self.ent_conf.insert(0, "0.72")
+        self.ent_conf.pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
