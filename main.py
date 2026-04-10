@@ -1499,3 +1499,82 @@ class AntenRuntime:
         # optional watcher stub file
         stub_path = os.path.join(app_home(), "web3_events.ndjson")
         self.watcher = Web3WatcherStub(self.bus, stub_path)
+        self.watcher.start()
+        self.model.push(f"watcher stub: {stub_path}")
+
+        # optional telegram
+        self.telegram.start()
+
+        if tk is not None:
+            self.desktop = DesktopApp(self.cfg, self.identity, self.bus, self.model)
+        else:
+            self.desktop = None
+
+    def run(self) -> None:
+        self.start()
+        if self.desktop is not None:
+            self.desktop.run()
+        else:
+            self._run_headless()
+
+    def _run_headless(self) -> None:
+        self.model.push("UI disabled: running headless. Press Ctrl+C to exit.")
+        try:
+            while not self._stop.is_set():
+                jitter_sleep(0.25)
+        except KeyboardInterrupt:
+            self._stop.set()
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        LOG.info("Stopping...")
+        try:
+            if self.watcher:
+                self.watcher.stop()
+        except Exception:
+            pass
+        try:
+            self.telegram.stop()
+        except Exception:
+            pass
+        try:
+            self.bus.stop()
+        except Exception:
+            pass
+        try:
+            self.store.close()
+        except Exception:
+            pass
+        try:
+            self.cfg_store.save(self.cfg)
+        except Exception:
+            pass
+
+    # ---------------------
+    # Event handlers
+    # ---------------------
+
+    def _on_signal_raw(self, ev: Event) -> None:
+        raw = ev.payload.get("raw")
+        source = ev.payload.get("source", "unknown")
+        try:
+            sig = self.ingestor.ingest_dict(raw, source=str(source))
+            self.model.last_signal = {
+                "id": sig.id,
+                "market": sig.market,
+                "confidence": sig.confidence,
+                "direction": sig.direction,
+                "t": sig.t,
+                "source": source,
+            }
+            self.model.push(f"signal {sig.market} dir={sig.direction} conf={sig.confidence:.2f} src={source}")
+
+            action = self.router.on_signal(sig)
+            self.model.last_action = action
+            if action.get("status") == "opened":
+                self.model.push(f"trade OPEN {action.get('market')} side={action.get('side')} id={action.get('trade_id')}")
+                self._tg_broadcast(f"OPEN {action.get('market')} side={action.get('side')} (paper)")
