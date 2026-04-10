@@ -1025,3 +1025,82 @@ class TelegramBotRunner:
                 await update.message.reply_text("Anten: access denied.")
                 return
             self.bus.publish("tg/status", {"chat_id": chat_id})
+            await update.message.reply_text("Anten: status requested.")
+
+        async def _kill(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._admin(chat_id):
+                await update.message.reply_text("Anten: admin only.")
+                return
+            self.bus.publish("risk/kill", {"on": True, "chat_id": chat_id})
+            await update.message.reply_text("Anten: kill switch ON.")
+
+        async def _unkill(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._admin(chat_id):
+                await update.message.reply_text("Anten: admin only.")
+                return
+            self.bus.publish("risk/kill", {"on": False, "chat_id": chat_id})
+            await update.message.reply_text("Anten: kill switch OFF.")
+
+        async def _positions(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._chat_allowed(chat_id):
+                await update.message.reply_text("Anten: access denied.")
+                return
+            self.bus.publish("tg/positions", {"chat_id": chat_id})
+            await update.message.reply_text("Anten: positions requested.")
+
+        async def _closeall(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._admin(chat_id):
+                await update.message.reply_text("Anten: admin only.")
+                return
+            self.bus.publish("broker/close_all", {"reason": "telegram_closeall", "chat_id": chat_id})
+            await update.message.reply_text("Anten: close_all requested.")
+
+        async def _on_text(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._chat_allowed(chat_id):
+                return
+            txt = (update.message.text or "").strip()
+            if not txt:
+                return
+            if txt.startswith("{") and txt.endswith("}"):
+                try:
+                    raw = json.loads(txt)
+                except Exception:
+                    await update.message.reply_text("Anten: bad JSON.")
+                    return
+                self.bus.publish("signal/raw", {"raw": raw, "source": "telegram", "chat_id": chat_id})
+                await update.message.reply_text("Anten: signal received.")
+                return
+            if txt.lower().startswith("price "):
+                parts = txt.split()
+                if len(parts) >= 3:
+                    market = parts[1].strip().upper()
+                    px = safe_float(parts[2], 0.0)
+                    self.bus.publish("oracle/snapshot", {"market": market, "px": px, "chat_id": chat_id})
+                    await update.message.reply_text(f"Anten: snapshot set for {market}.")
+                    return
+            await update.message.reply_text("Anten: unrecognized message. Use /help.")
+
+        app = Application.builder().token(token).build()
+        self._app = app
+
+        app.add_handler(CommandHandler("start", _start))
+        app.add_handler(CommandHandler("help", _help))
+        app.add_handler(CommandHandler("status", _status))
+        app.add_handler(CommandHandler("positions", _positions))
+        app.add_handler(CommandHandler("closeall", _closeall))
+        app.add_handler(CommandHandler("kill", _kill))
+        app.add_handler(CommandHandler("unkill", _unkill))
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), _on_text))
+
+        LOG.info("Telegram: starting polling")
+        try:
+            app.run_polling(close_loop=False, stop_signals=None)
+        except Exception as e:
+            LOG.warn(f"Telegram: stopped ({e})")
+        finally:
+            self._app = None
