@@ -1420,3 +1420,82 @@ class DesktopApp:
         if not path:
             return
         self.bus.publish("io/import_file", {"path": path})
+
+    def export_signals(self) -> None:
+        if filedialog is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export signals",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.bus.publish("io/export_signals", {"path": path})
+
+    def on_close(self) -> None:
+        self.bus.publish("app/stop", {"source": "ui"})
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+# ---- APP ORCHESTRATION ----
+
+
+class AntenRuntime:
+    def __init__(self) -> None:
+        self.identity = AppIdentity(run_id=short_id("run_"), instance_salt=secrets.token_hex(24))
+        self.cfg_store = ConfigStore(os.path.join(app_home(), "config.json"))
+        self.cfg = self.cfg_store.load()
+        self.cfg.normalize()
+
+        self.store = SqliteStore(self.cfg.db_path)
+        self.bus = EventBus()
+        self.model = UiModel()
+        self.codec = SignalCodec(self.identity)
+        self.limiter = SignalLimiter(self.cfg.max_signals_per_min)
+        self.oracle = PriceOracle(self.identity)
+        self.risk = RiskEngine(self.cfg)
+        self.broker = PaperBroker(self.cfg, self.oracle, self.store, self.risk)
+        self.router = StrategyRouter(self.cfg, self.limiter, self.broker, self.store)
+        self.ingestor = SignalIngestor(self.codec, self.bus)
+        self.telegram = TelegramBotRunner(self.cfg, self.bus)
+
+        self.desktop: DesktopApp | None = None
+        self.watcher: Web3WatcherStub | None = None
+
+        self._stop = threading.Event()
+        self._bg_threads: list[threading.Thread] = []
+
+        self._wire_events()
+
+    def _wire_events(self) -> None:
+        self.bus.subscribe("signal/raw", self._on_signal_raw)
+        self.bus.subscribe("io/import_file", self._on_import_file)
+        self.bus.subscribe("io/export_signals", self._on_export_signals)
+        self.bus.subscribe("oracle/snapshot", self._on_oracle_snapshot)
+        self.bus.subscribe("risk/kill", self._on_risk_kill)
+        self.bus.subscribe("broker/close_all", self._on_close_all)
+        self.bus.subscribe("ui/snapshot", self._on_ui_snapshot)
+        self.bus.subscribe("tg/status", self._on_tg_status)
+        self.bus.subscribe("tg/positions", self._on_tg_positions)
+        self.bus.subscribe("app/stop", self._on_stop)
+
+    def start(self) -> None:
+        LOG.info(f"{APP_NAME} starting (version={APP_VERSION}, run={self.identity.run_id})")
+        self.model.push(f"{APP_NAME} {APP_VERSION} — {human_dt(utc_ts())}")
+        self.model.push(f"db: {self.cfg.db_path}")
+        self.model.push(f"export: {self.cfg.export_dir}")
+        self.model.push("paper trading: ON")
+
+        self.bus.start()
+
+        # start background telemetry pump
+        thr = threading.Thread(target=self._telemetry_loop, name="telemetry", daemon=True)
+        thr.start()
+        self._bg_threads.append(thr)
+
+        # optional watcher stub file
+        stub_path = os.path.join(app_home(), "web3_events.ndjson")
+        self.watcher = Web3WatcherStub(self.bus, stub_path)
