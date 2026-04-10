@@ -1341,3 +1341,82 @@ class DesktopApp:
         self.ent_conf = ttk.Entry(lf3)
         self.ent_conf.insert(0, "0.72")
         self.ent_conf.pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
+
+        row = ttk.Frame(lf3)
+        row.pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
+        ttk.Button(row, text="Long", command=lambda: self.send_quick_signal(1)).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(row, text="Flat", command=lambda: self.send_quick_signal(0)).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(row, text="Short", command=lambda: self.send_quick_signal(-1)).pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        # Telemetry
+        lf4 = ttk.Labelframe(right, text="Telemetry")
+        lf4.pack(side=tk.TOP, fill=tk.X, pady=(10, 0))
+
+        self.lbl_equity = ttk.Label(lf4, text="Equity: —")
+        self.lbl_equity.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
+        self.lbl_cash = ttk.Label(lf4, text="Cash: —")
+        self.lbl_cash.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
+        self.lbl_pos = ttk.Label(lf4, text="Positions: —")
+        self.lbl_pos.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
+        self.lbl_last = ttk.Label(lf4, text="Last: —")
+        self.lbl_last.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
+
+    def _tick(self) -> None:
+        snap = self.model.snapshot()
+        if self._ui_last_snapshot != snap:
+            self._render(snap)
+            self._ui_last_snapshot = snap
+        self.root.after(int(self.cfg.ui_tick_ms), self._tick)
+
+    def _render(self, snap: dict) -> None:
+        lines: list[str] = snap["lines"]
+        if lines:
+            self.txt.delete("1.0", "end")
+            self.txt.insert("end", "\n".join(lines[-350:]) + "\n")
+            self.txt.see("end")
+        last_signal = snap.get("last_signal")
+        if last_signal:
+            self.lbl_last.configure(text=f"Last: {last_signal.get('market')} conf={last_signal.get('confidence')}")
+
+        toast = snap.get("toast")
+        if toast:
+            self.root.title(f"{APP_NAME} — {toast}")
+
+    def set_telemetry(self, equity: float, cash: float, npos: int) -> None:
+        self.lbl_equity.configure(text=f"Equity: {fmt_money(equity)}")
+        self.lbl_cash.configure(text=f"Cash: {fmt_money(cash)}")
+        self.lbl_pos.configure(text=f"Positions: {npos}")
+
+    def on_kill_toggle(self) -> None:
+        on = bool(self.var_kill.get())
+        self.bus.publish("risk/kill", {"on": on, "source": "ui"})
+
+    def on_close_all(self) -> None:
+        self.bus.publish("broker/close_all", {"reason": "ui_closeall"})
+
+    def on_snapshot(self) -> None:
+        self.bus.publish("ui/snapshot", {})
+
+    def send_quick_signal(self, direction: int) -> None:
+        market = self.ent_market.get().strip().upper()
+        conf = safe_float(self.ent_conf.get().strip(), 0.65)
+        raw = {
+            "market": market,
+            "strat": "ui/quick",
+            "direction": int(direction),
+            "confidence": float(conf),
+            "notional_hint": 0.0,
+            "meta_hash": sha256_hex(f"ui|{utc_ts()}|{market}|{direction}|{conf}")[:64],
+        }
+        self.bus.publish("signal/raw", {"raw": raw, "source": "ui"})
+
+    def import_signal(self) -> None:
+        if filedialog is None:
+            return
+        path = filedialog.askopenfilename(
+            title="Import signal JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.bus.publish("io/import_file", {"path": path})
