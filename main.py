@@ -946,3 +946,82 @@ class TelegramBotRunner:
         self._app = None
         self._last_push: dict[int, int] = {}
 
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def start(self) -> None:
+        if not self._enabled:
+            LOG.info("Telegram: disabled (no token or disabled in config)")
+            return
+        self._thr = threading.Thread(target=self._run, name="telegram", daemon=True)
+        self._thr.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            if self._app is not None:
+                # best-effort stop (async lib)
+                pass
+        except Exception:
+            pass
+
+    def push(self, chat_id: int, text: str) -> None:
+        # Only used if the PTB app is running; otherwise ignored.
+        try:
+            if self._app is None:
+                return
+            # rate limit pushes per chat
+            t_now = utc_ts()
+            last = self._last_push.get(chat_id, 0)
+            if t_now - last < 1:
+                return
+            self._last_push[chat_id] = t_now
+            self._app.bot.send_message(chat_id=chat_id, text=text)
+        except Exception as e:
+            LOG.debug(f"Telegram push failed: {e}")
+
+    def _run(self) -> None:
+        try:
+            from telegram import Update
+            from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+        except Exception as e:
+            LOG.warn(f"Telegram: missing dependency. Install python-telegram-bot. ({e})")
+            self._enabled = False
+            return
+
+        token = self.token
+        if not token:
+            self._enabled = False
+            return
+
+        async def _start(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._chat_allowed(chat_id):
+                await update.message.reply_text("Anten: access denied.")
+                return
+            await update.message.reply_text(
+                f"Anten online.\nVersion: {APP_VERSION}\n"
+                f"Commands: /status /kill /unkill /positions /closeall /help"
+            )
+
+        async def _help(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._chat_allowed(chat_id):
+                await update.message.reply_text("Anten: access denied.")
+                return
+            await update.message.reply_text(
+                "Anten commands:\n"
+                "/status — equity snapshot\n"
+                "/positions — open positions\n"
+                "/closeall — close all paper positions\n"
+                "/kill — enable kill switch\n"
+                "/unkill — disable kill switch\n"
+                "You can also paste a JSON signal object."
+            )
+
+        async def _status(update: "Update", context: "ContextTypes.DEFAULT_TYPE") -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            if not self._chat_allowed(chat_id):
+                await update.message.reply_text("Anten: access denied.")
+                return
+            self.bus.publish("tg/status", {"chat_id": chat_id})
