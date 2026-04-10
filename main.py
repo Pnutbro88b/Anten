@@ -867,3 +867,82 @@ class PaperBroker:
                 side=pos.side,
                 qty=pos.qty,
                 entry=pos.entry,
+                exit=float(px),
+                fee=fee,
+                pnl=pnl - fee,
+                status="CLOSED",
+                reason=reason,
+            )
+            self.store.add_trade(tr)
+            self.risk.cool(market)
+            return tr
+
+    def close_all(self, reason: str = "close_all") -> list[Trade]:
+        out: list[Trade] = []
+        for m in list(self.positions.keys()):
+            try:
+                out.append(self.close(m, reason=reason))
+            except Exception as e:
+                LOG.warn(f"close_all failed for {m}: {e}")
+        return out
+
+
+# ---- STRATEGY ROUTER ----
+
+
+class StrategyRouter:
+    """Conservative router: filters signals and opens paper trades (no auto-flips)."""
+
+    def __init__(self, cfg: AppConfig, limiter: SignalLimiter, broker: PaperBroker, store: SqliteStore) -> None:
+        self.cfg = cfg
+        self.limiter = limiter
+        self.broker = broker
+        self.store = store
+        self._lock = threading.Lock()
+
+    def accept(self, s: Signal) -> bool:
+        if not self.limiter.allow(s.t):
+            return False
+        if s.confidence < float(self.cfg.min_confidence):
+            return False
+        if self.cfg.allowed_markets and s.market not in set(m.upper() for m in self.cfg.allowed_markets):
+            return False
+        return True
+
+    def on_signal(self, s: Signal) -> dict:
+        with self._lock:
+            if not self.accept(s):
+                return {"status": "ignored", "reason": "filtered"}
+
+            self.store.add_signal(s)
+
+            if self.cfg.kill_switch:
+                return {"status": "ignored", "reason": "kill_switch"}
+
+            # Only open trades when we are flat on that market.
+            if s.market in self.broker.positions:
+                return {"status": "ignored", "reason": "already_in_position"}
+
+            try:
+                tr = self.broker.open_from_signal(s, reason=f"{s.strat}:{s.id}")
+                return {"status": "opened", "trade_id": tr.id, "market": tr.market, "side": tr.side}
+            except Exception as e:
+                return {"status": "rejected", "reason": str(e)}
+
+
+# ---- TELEGRAM BOT (OPTIONAL) ----
+
+
+class TelegramBotRunner:
+    """Optional Telegram bot (enabled by `ANTEN_TELEGRAM_TOKEN`)."""
+
+    def __init__(self, cfg: AppConfig, bus: EventBus) -> None:
+        self.cfg = cfg
+        self.bus = bus
+        self.token = env("ANTEN_TELEGRAM_TOKEN")
+        self._enabled = bool(self.token and cfg.telegram_enabled)
+        self._thr: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._app = None
+        self._last_push: dict[int, int] = {}
+
