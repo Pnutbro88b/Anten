@@ -1183,3 +1183,82 @@ class Web3WatcherStub:
 
     def start(self) -> None:
         self._thr.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thr.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                if not os.path.exists(self.path):
+                    jitter_sleep(0.7)
+                    continue
+                with open(self.path, "r", encoding="utf-8") as f:
+                    f.seek(self._pos)
+                    chunk = f.read()
+                    self._pos = f.tell()
+                if not chunk:
+                    jitter_sleep(0.35)
+                    continue
+                for line in chunk.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(raw, dict):
+                        self.bus.publish("signal/raw", {"raw": raw, "source": "web3_stub"})
+            except Exception as e:
+                LOG.debug(f"watcher stub error: {e}")
+                jitter_sleep(1.0)
+
+
+# ---- UI ----
+
+
+class UiModel:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.status_lines: list[str] = []
+        self.last_signal: dict | None = None
+        self.last_action: dict | None = None
+        self.toast: str | None = None
+
+    def push(self, line: str, cap: int = 400) -> None:
+        with self._lock:
+            self.status_lines.append(line)
+            if len(self.status_lines) > cap:
+                self.status_lines = self.status_lines[-cap:]
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "lines": list(self.status_lines),
+                "last_signal": self.last_signal,
+                "last_action": self.last_action,
+                "toast": self.toast,
+            }
+
+    def set_toast(self, msg: str | None) -> None:
+        with self._lock:
+            self.toast = msg
+
+
+class DesktopApp:
+    def __init__(self, cfg: AppConfig, identity: AppIdentity, bus: EventBus, model: UiModel) -> None:
+        if tk is None:
+            raise RuntimeError("Tkinter is not available in this Python environment.")
+        self.cfg = cfg
+        self.identity = identity
+        self.bus = bus
+        self.model = model
+
+        self.root = tk.Tk()
+        self.root.title(f"{APP_NAME} — {APP_VERSION}")
+        self.root.geometry("1080x720")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self._build_style()
