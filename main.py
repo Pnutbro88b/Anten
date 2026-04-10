@@ -1104,3 +1104,82 @@ class TelegramBotRunner:
             LOG.warn(f"Telegram: stopped ({e})")
         finally:
             self._app = None
+
+    def _chat_allowed(self, chat_id: int) -> bool:
+        if not self.cfg.telegram_chat_allowlist:
+            return True
+        return int(chat_id) in set(int(x) for x in self.cfg.telegram_chat_allowlist)
+
+    def _admin(self, chat_id: int) -> bool:
+        if int(chat_id) in set(int(x) for x in self.cfg.telegram_admins):
+            return True
+        # fallback: allow if allowlist exists and chat is allowlisted
+        if self.cfg.telegram_admins:
+            return False
+        return self._chat_allowed(chat_id)
+
+
+# ---- IMPORT / EXPORT / WATCHERS ----
+
+
+class SignalIngestor:
+    def __init__(self, codec: SignalCodec, bus: EventBus) -> None:
+        self.codec = codec
+        self.bus = bus
+
+    def ingest_dict(self, raw: dict, source: str = "manual") -> Signal:
+        s = self.codec.parse(raw)
+        self.bus.publish("signal/parsed", {"signal_id": s.id, "market": s.market, "score": s.score(), "source": source})
+        return s
+
+    def ingest_json_text(self, text: str, source: str = "text") -> Signal:
+        try:
+            raw = json.loads(text)
+        except Exception as e:
+            raise SignalError(f"bad JSON: {e}") from e
+        if not isinstance(raw, dict):
+            raise SignalError("JSON must be an object")
+        return self.ingest_dict(raw, source=source)
+
+    def ingest_file(self, path: str, source: str = "file") -> list[Signal]:
+        txt = open(path, "r", encoding="utf-8").read()
+        txt = txt.strip()
+        if not txt:
+            return []
+        out: list[Signal] = []
+        if txt.startswith("["):
+            arr = json.loads(txt)
+            if not isinstance(arr, list):
+                raise SignalError("expected list")
+            for item in arr:
+                if isinstance(item, dict):
+                    out.append(self.ingest_dict(item, source=source))
+            return out
+        out.append(self.ingest_json_text(txt, source=source))
+        return out
+
+    def export_signals(self, store: SqliteStore, out_path: str, limit: int = 500) -> None:
+        rows = store.list_signals(limit=limit)
+        payload = {
+            "app": APP_NAME,
+            "version": APP_VERSION,
+            "t": utc_ts(),
+            "count": len(rows),
+            "signals": rows,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+
+class Web3WatcherStub:
+    """Reads NDJSON lines from a file and publishes them as raw signals."""
+
+    def __init__(self, bus: EventBus, path: str) -> None:
+        self.bus = bus
+        self.path = path
+        self._stop = threading.Event()
+        self._thr = threading.Thread(target=self._run, name="watcher", daemon=True)
+        self._pos = 0
+
+    def start(self) -> None:
+        self._thr.start()
